@@ -203,6 +203,13 @@ fn parse<'a>(
             roots.insert(object_reference.root_role.try_into()?, oid_root);
         } else if let FileNodeData::DataSignatureGroupDefinitionFND(_) = current {
             iterator.next();
+        } else if let FileNodeData::ObjectInfoDependencyOverridesFND(_) = current {
+            // See MS-ONESTORE 2.5.20: reference-count overrides only, which don't
+            // affect materialized object state. Usually consumed right after an
+            // ObjectGroupList or object declaration (see `iterator_skip_if_matching!`
+            // above), but it can also appear on its own directly in the manifest.
+            log::debug!("Skipping stray ObjectInfoDependencyOverridesFND in revision manifest");
+            iterator.next();
         } else {
             return Err(
                 onestore_parse_error!("Unexpected node (parsing Revision): {:?}", current).into(),
@@ -279,4 +286,49 @@ fn find_dependency_object(
         revision_id = revision.parent_id;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::onestore::desktop::file_node::FileNode;
+    use crate::onestore::desktop::file_node::revision_manifest::RevisionManifestStart4FND;
+    use crate::onestore::desktop::file_node::shared::ObjectInfoDependencyOverridesFND;
+    use crate::onestore::desktop::file_structure::FileNodeList;
+    use crate::shared::guid::Guid;
+    use uuid::Uuid;
+
+    fn id(value: u128) -> ExGuid {
+        ExGuid::from_guid(Guid(Uuid::from_u128(value)), 1)
+    }
+
+    /// MS-ONESTORE 2.5.20: an `ObjectInfoDependencyOverridesFND` carries only
+    /// reference-count overrides and can appear directly in a revision
+    /// manifest, not just immediately after an `ObjectGroupList` or object
+    /// declaration. Before this fix, hitting it here fell through to the
+    /// "Unexpected node (parsing Revision)" error and aborted the section.
+    #[test]
+    fn skips_stray_object_info_dependency_overrides_in_revision_manifest() {
+        let revision_id = id(1);
+        let list = FileNodeList {
+            file_node_sequence: vec![
+                FileNode::for_test(FileNodeData::RevisionManifestStart4FND(
+                    RevisionManifestStart4FND::for_test(revision_id, ExGuid::default(), 1),
+                )),
+                FileNode::for_test(FileNodeData::ObjectInfoDependencyOverridesFND(
+                    ObjectInfoDependencyOverridesFND::for_test(),
+                )),
+                FileNode::for_test(FileNodeData::RevisionManifestEndFND),
+            ],
+        };
+        let mut iterator = list.iter_data();
+        let context = ParseContext::new();
+        let revisions = HashMap::new();
+
+        let revision = try_parse(&mut iterator, &context, &revisions)
+            .expect("a stray ObjectInfoDependencyOverridesFND should not be fatal")
+            .expect("a revision manifest start node should be recognized");
+
+        assert_eq!(revision.id, revision_id);
+    }
 }

@@ -33,6 +33,19 @@ pub(crate) struct RevisionManifestStart4FND {
     odcs_default: u16,
 }
 
+#[cfg(test)]
+impl RevisionManifestStart4FND {
+    pub(crate) fn for_test(rid: ExGuid, rid_dependent: ExGuid, revision_role: u32) -> Self {
+        Self {
+            rid,
+            rid_dependent,
+            reserved_time_creation: 0,
+            revision_role,
+            odcs_default: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Parse)]
 #[allow(dead_code)]
 pub(crate) struct RevisionManifestStart6FND {

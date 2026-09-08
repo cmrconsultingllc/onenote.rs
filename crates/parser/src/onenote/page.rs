@@ -3,7 +3,7 @@ use crate::errors::{ErrorKind, Result};
 use crate::fsshttpb::data::exguid::ExGuid;
 use crate::one::property::layout_alignment::LayoutAlignment;
 use crate::one::property_set::{page_manifest_node, page_metadata, page_node, title_node};
-use crate::onenote::ParserContext;
+use crate::onenote::{ParserContext, parse_lenient};
 use crate::onenote::ink_recognition::{InkRecognition, parse_ink_recognition};
 use crate::onenote::outline::{Outline, parse_outline};
 use crate::onenote::page_content::{PageContent, parse_page_content};
@@ -195,11 +195,10 @@ pub(crate) fn parse_page(
         .transpose()?
         .flatten();
 
-    let contents: Vec<PageContent> = data
-        .content
-        .into_iter()
-        .map(|content_id| parse_page_content(content_id, page_space, ctx))
-        .collect::<Result<_>>()?;
+    let contents: Vec<PageContent> =
+        parse_lenient(ctx, "page content", data.content, |content_id, ctx| {
+            parse_page_content(content_id, page_space, ctx)
+        });
 
     ctx.recognized_words.clear();
 
@@ -245,11 +244,9 @@ fn parse_title(
         .get_object(title_id)
         .ok_or_else(|| ErrorKind::MalformedOneNoteData("title object is missing".into()))?;
     let title = title_node::parse(title_object)?;
-    let contents = title
-        .children
-        .into_iter()
-        .map(|outline_id| parse_outline(outline_id, space, ctx))
-        .collect::<Result<_>>()?;
+    let contents = parse_lenient(ctx, "title outline", title.children, |outline_id, ctx| {
+        parse_outline(outline_id, space, ctx)
+    });
 
     Ok(Title {
         contents,

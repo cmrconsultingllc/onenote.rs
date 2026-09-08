@@ -57,6 +57,34 @@ pub(crate) struct ParserContext {
     pub(crate) recognized_words: HashMap<ExGuid, InkRecognizedWord>,
 }
 
+/// Parses each `id` in `ids` with `parse`, skipping (with a warning pushed to
+/// `ctx.report`) any whose parse call fails instead of aborting the whole
+/// parent structure.
+///
+/// Heavily-edited notebooks can leave a stale or unrecognized object-type
+/// reference behind (e.g. a child pointing at an object whose declared jcid
+/// no longer matches what the parent expects). Losing that one child should
+/// cost the page a single content item, not the whole page or section.
+pub(crate) fn parse_lenient<Id, T>(
+    ctx: &mut ParserContext,
+    label: &str,
+    ids: Vec<Id>,
+    mut parse: impl FnMut(Id, &mut ParserContext) -> Result<T>,
+) -> Vec<T>
+where
+    Id: std::fmt::Debug,
+{
+    let mut items = Vec::with_capacity(ids.len());
+    for id in ids {
+        let id_debug = format!("{id:?}");
+        match parse(id, ctx) {
+            Ok(item) => items.push(item),
+            Err(err) => warn!(ctx, "skipping unparsable {label} {id_debug}: {err}"),
+        }
+    }
+    items
+}
+
 /// The OneNote file parser.
 ///
 /// Use [`Parser::parse_notebook`] to load a notebook from a `.onetoc2` file or
@@ -520,13 +548,55 @@ impl Default for Parser<NativeFs> {
 
 #[cfg(test)]
 mod tests {
-    use super::Parser;
+    use super::{ParserContext, Parser, parse_lenient};
+    use crate::errors::ErrorKind;
     use crate::fs::native_fs::NativeFs;
+    use crate::warn::Report;
     use tempfile::tempdir;
     use typed_path::TypedPath;
 
     fn base_path(dir: &std::path::Path) -> typed_path::TypedPathBuf {
         TypedPath::derive(dir.to_str().expect("tempdir path is UTF-8")).to_path_buf()
+    }
+
+    fn test_context() -> ParserContext {
+        ParserContext {
+            page: None,
+            report: Report::new(),
+            recognized_words: Default::default(),
+        }
+    }
+
+    #[test]
+    fn parse_lenient_keeps_successes_and_warns_on_failures() {
+        let mut ctx = test_context();
+
+        let items = parse_lenient(&mut ctx, "widget", vec![1u32, 2, 3], |id, _ctx| {
+            if id == 2 {
+                Err(ErrorKind::MalformedOneNoteData("unexpected object type: 0xBAD".into()).into())
+            } else {
+                Ok(id * 10)
+            }
+        });
+
+        // The failing item (2) is dropped; the others are kept in order.
+        assert_eq!(items, vec![10, 30]);
+
+        // The failure is recorded as a warning instead of aborting the batch.
+        let warnings = ctx.report.warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message().contains("widget"));
+        assert!(warnings[0].message().contains("unexpected object type: 0xBAD"));
+    }
+
+    #[test]
+    fn parse_lenient_returns_everything_when_nothing_fails() {
+        let mut ctx = test_context();
+
+        let items = parse_lenient(&mut ctx, "widget", vec![1u32, 2, 3], |id, _ctx| Ok(id));
+
+        assert_eq!(items, vec![1, 2, 3]);
+        assert!(ctx.report.warnings().is_empty());
     }
 
     #[test]

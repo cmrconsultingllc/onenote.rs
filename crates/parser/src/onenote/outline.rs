@@ -2,7 +2,7 @@ use crate::errors::{ErrorKind, Result};
 use crate::fsshttpb::data::exguid::ExGuid;
 use crate::one::property::layout_alignment::LayoutAlignment;
 use crate::one::property_set::{PropertySetId, outline_element_node, outline_group, outline_node};
-use crate::onenote::ParserContext;
+use crate::onenote::{ParserContext, parse_lenient};
 use crate::onenote::content::{Content, parse_content};
 use crate::onenote::list::{List, parse_list};
 use crate::onestore::ObjectSpace;
@@ -267,11 +267,9 @@ pub(crate) fn parse_outline(
         .ok_or_else(|| ErrorKind::MalformedOneNoteData("outline node is missing".into()))?;
     let data = outline_node::parse(outline_object)?;
 
-    let items = data
-        .children
-        .into_iter()
-        .map(|item_id| parse_outline_item(item_id, space, ctx))
-        .collect::<Result<_>>()?;
+    let items = parse_lenient(ctx, "outline item", data.children, |item_id, ctx| {
+        parse_outline_item(item_id, space, ctx)
+    });
 
     let outline = Outline {
         items,
@@ -341,11 +339,9 @@ fn parse_outline_group(
         );
     }
 
-    let outlines = data
-        .children
-        .into_iter()
-        .map(|item_id| parse_outline_item(item_id, space, ctx))
-        .collect::<Result<_>>()?;
+    let outlines = parse_lenient(ctx, "outline item", data.children, |item_id, ctx| {
+        parse_outline_item(item_id, space, ctx)
+    });
 
     let group = OutlineGroup {
         child_level: data.child_level,
@@ -371,17 +367,13 @@ pub(crate) fn parse_outline_element(
         );
     }
 
-    let children = data
-        .children
-        .into_iter()
-        .map(|item_id| parse_outline_item(item_id, space, ctx))
-        .collect::<Result<_>>()?;
+    let children = parse_lenient(ctx, "outline item", data.children, |item_id, ctx| {
+        parse_outline_item(item_id, space, ctx)
+    });
 
-    let contents = data
-        .contents
-        .into_iter()
-        .map(|content_id| parse_content(content_id, space, ctx))
-        .collect::<Result<_>>()?;
+    let contents = parse_lenient(ctx, "outline content", data.contents, |content_id, ctx| {
+        parse_content(content_id, space, ctx)
+    });
 
     let list_contents = data
         .list_contents
@@ -398,4 +390,128 @@ pub(crate) fn parse_outline_element(
     };
 
     Ok(element)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fsshttpb::data::cell_id::CellId;
+    use crate::onestore::shared::compact_id::CompactId;
+    use crate::onestore::shared::jcid::JcId;
+    use crate::onestore::shared::object_prop_set::ObjectPropSet;
+    use crate::onestore::{MappingTable, Object};
+    use crate::shared::guid::Guid;
+    use crate::warn::Report;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use uuid::Uuid;
+
+    struct TestMapping;
+
+    impl MappingTable for TestMapping {
+        fn resolve_id(&self, _index: usize, _cid: &CompactId) -> Option<ExGuid> {
+            None
+        }
+
+        fn get_object_space(&self, _index: usize, _cid: &CompactId) -> Option<CellId> {
+            None
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TestSpace {
+        objects: HashMap<ExGuid, Object>,
+    }
+
+    impl ObjectSpace for TestSpace {
+        fn get_object(&self, id: ExGuid) -> Option<&Object> {
+            self.objects.get(&id)
+        }
+
+        fn content_root(&self) -> Option<ExGuid> {
+            None
+        }
+
+        fn metadata_root(&self) -> Option<ExGuid> {
+            None
+        }
+    }
+
+    fn id(value: u128) -> ExGuid {
+        ExGuid::from_guid(Guid(Uuid::from_u128(value)), 1)
+    }
+
+    fn object_with_jcid(jc_id: JcId) -> Object {
+        Object {
+            context_id: ExGuid::default(),
+            jc_id,
+            props: ObjectPropSet::default(),
+            file_data: None,
+            mapping: Rc::new(TestMapping),
+        }
+    }
+
+    fn test_ctx() -> ParserContext {
+        ParserContext {
+            page: None,
+            report: Report::new(),
+            recognized_words: Default::default(),
+        }
+    }
+
+    /// Reproduces the corruption class seen in heavily-edited notebooks: an
+    /// outline item reference resolves to an object whose jcid is real and
+    /// known to the parser (here `VersionHistoryMetadata`, jcid 0x20046 --
+    /// see MS-ONE 2.1.13) but isn't a valid outline item type. This is the
+    /// same failure class as the "unexpected object type: 0x20046" errors
+    /// that used to abort a whole section; `parse_lenient` (see
+    /// `parse_outline`/`parse_outline_group`/`parse_outline_element`) is what
+    /// turns this per-item failure into a skip-and-warn instead.
+    #[test]
+    fn parse_outline_item_rejects_a_known_but_wrong_jcid() {
+        let item_id = id(1);
+        let mut space = TestSpace::default();
+        space.objects.insert(
+            item_id,
+            object_with_jcid(PropertySetId::VersionHistoryMetadata.as_jcid()),
+        );
+        let mut ctx = test_ctx();
+
+        let err = parse_outline_item(item_id, &space, &mut ctx)
+            .expect_err("a VersionHistoryMetadata object is not a valid outline item");
+
+        assert!(err.to_string().contains("invalid outline item type"));
+    }
+
+    #[test]
+    fn parse_lenient_skips_bad_outline_items_instead_of_failing_the_whole_batch() {
+        let first_bad_id = id(1);
+        let second_bad_id = id(2);
+        let mut space = TestSpace::default();
+        for bad_id in [first_bad_id, second_bad_id] {
+            space.objects.insert(
+                bad_id,
+                object_with_jcid(PropertySetId::VersionHistoryMetadata.as_jcid()),
+            );
+        }
+        let mut ctx = test_ctx();
+
+        let items = parse_lenient(
+            &mut ctx,
+            "outline item",
+            vec![first_bad_id, second_bad_id],
+            |item_id, ctx| parse_outline_item(item_id, &space, ctx),
+        );
+
+        // Both bad items are dropped rather than aborting the batch on the
+        // first failure, and each produces its own warning.
+        assert!(items.is_empty());
+        assert_eq!(ctx.report.warnings().len(), 2);
+        assert!(
+            ctx.report
+                .warnings()
+                .iter()
+                .all(|w| w.message().contains("invalid outline item type"))
+        );
+    }
 }

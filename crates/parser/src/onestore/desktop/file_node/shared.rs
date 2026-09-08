@@ -134,6 +134,23 @@ pub(crate) struct ObjectInfoDependencyOverridesFND {
     data: ObjectInfoDependencyOverrideData,
 }
 
+#[cfg(test)]
+impl ObjectInfoDependencyOverridesFND {
+    /// Builds an empty overrides node for tests that only care about its
+    /// presence in a revision manifest, not its reference-count contents.
+    pub(crate) fn for_test() -> Self {
+        Self {
+            data: ObjectInfoDependencyOverrideData {
+                c8_override_count: 0,
+                c32_override_count: 0,
+                crc: 0,
+                overrides1: Vec::new(),
+                overrides2: Vec::new(),
+            },
+        }
+    }
+}
+
 impl<'a> ParseWithRef<'a> for ObjectInfoDependencyOverridesFND {
     fn parse(reader: Reader, obj_ref: &FileNodeDataRef) -> Result<Self> {
         if let FileNodeDataRef::SingleElement(obj_ref) = obj_ref {

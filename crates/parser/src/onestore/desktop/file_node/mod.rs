@@ -113,6 +113,24 @@ pub(crate) enum FileNodeData {
     Null,
 }
 
+#[cfg(test)]
+impl FileNode {
+    /// Builds a [`FileNode`] wrapping `fnd` directly, bypassing the byte-level
+    /// header fields (which higher-level parsing never reads once a node has
+    /// been decoded). Used to drive [`FileNodeDataIterator`](crate::onestore::desktop::file_structure::FileNodeDataIterator)
+    /// from synthetic data in tests without round-tripping through bytes.
+    pub(crate) fn for_test(fnd: FileNodeData) -> Self {
+        Self {
+            node_type_id: 0,
+            stp_format: 0,
+            cb_format: 0,
+            base_type: 0,
+            size: 0,
+            fnd,
+        }
+    }
+}
+
 impl FileNode {
     pub(crate) fn parse(reader: Reader, context: &mut ParseContext) -> crate::errors::Result<Self> {
         let remaining_0 = reader.remaining();
