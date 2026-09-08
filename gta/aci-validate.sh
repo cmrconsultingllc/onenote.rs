@@ -52,17 +52,29 @@ git clone --branch "$BRANCH" --depth 1 "$REPO" /work/src 2>&1 | tail -5
 grep -q '^cargo_test_exit=0$' /tmp/cargo_test_wrapper.log && echo "== cargo test: PASS ==" || echo "== cargo test: FAIL (see above) =="
 
 echo "== building one2html from git, patched to use ${REPO}@${BRANCH} =="
-# No --locked: one2html ships a Cargo.lock pinning onenote_parser to a plain
-# crates.io version, and --locked forces cargo to honor that lock verbatim,
-# silently ignoring the [patch.crates-io] override below. Dropping --locked
-# lets cargo re-resolve with the patch in effect.
+# `cargo install --git ... --config patch.crates-io...` silently ignores the
+# patch regardless of --locked -- one2html's own Cargo.toml already carries a
+# [patch.crates-io] pointing onenote_parser at upstream `master`, and that
+# manifest-level patch isn't honored by `cargo install --git` either. Cloning
+# one2html and building with `cargo install --path .` uses the normal
+# workspace-root patch resolution path, which does honor [patch]. Its
+# existing [patch.crates-io] table (the last section in the file) is replaced
+# with one pointing at our fix branch instead of appended, since TOML doesn't
+# allow duplicate tables.
 t0=$(date +%s)
-cargo +nightly install --git https://github.com/msiemens/one2html \
-  --config "patch.crates-io.onenote_parser.git=\"${REPO}\"" \
-  --config "patch.crates-io.onenote_parser.branch=\"${BRANCH}\"" \
-  > /tmp/one2html_build.log 2>&1
+git clone https://github.com/msiemens/one2html /work/one2html > /tmp/one2html_clone.log 2>&1
+sed -i '/^\[patch\.crates-io\]/,$d' /work/one2html/Cargo.toml
+cat >> /work/one2html/Cargo.toml <<EOF
+
+[patch.crates-io]
+onenote_parser = { git = "${REPO}", branch = "${BRANCH}" }
+EOF
+(
+  cd /work/one2html
+  cargo +nightly install --path .
+) > /tmp/one2html_build.log 2>&1
 build_status=$?
-grep -E "^(error|warning: patch|  Installing|   Installed)" /tmp/one2html_build.log | tail -40
+grep -E "^(error|warning: patch|  Installing|   Installed|    Updating)" /tmp/one2html_build.log | tail -40
 echo "one2html build: $(( $(date +%s) - t0 ))s, exit=${build_status}"
 if ! command -v one2html >/dev/null 2>&1; then
   echo "FAIL: one2html did not build against ${BRANCH} (2.0 API break or other failure)"

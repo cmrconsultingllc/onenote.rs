@@ -313,7 +313,11 @@ mod tests {
         let list = FileNodeList {
             file_node_sequence: vec![
                 FileNode::for_test(FileNodeData::RevisionManifestStart4FND(
-                    RevisionManifestStart4FND::for_test(revision_id, ExGuid::default(), 1),
+                    RevisionManifestStart4FND::for_test(
+                        revision_id.into(),
+                        ExGuid::default().into(),
+                        1,
+                    ),
                 )),
                 FileNode::for_test(FileNodeData::ObjectInfoDependencyOverridesFND(
                     ObjectInfoDependencyOverridesFND::for_test(),
