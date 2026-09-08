@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Validates the onenote_parser VCIMCO fix branch against the client's 28-section
 # sample. Runs inside an Azure Container Instance (VCIMCO_AI_RG, image
-# mcr.microsoft.com/devcontainers/rust:1-bookworm). Two steps:
+# mcr.microsoft.com/devcontainers/rust:1-bookworm). Three steps:
 #   1. `cargo test` the fix branch directly (compiles the patch + runs the new
 #      synthetic-data unit tests, plus the existing suite).
-#   2. Build one2html from git, patched via cargo's `[patch.crates-io]` so it
-#      pulls `onenote_parser` from this branch instead of crates.io, then
-#      render every `.one` section from the SAS-provided sample and write a
-#      JSON report (section -> ok/fail, pages, ms).
+#   2. Build one2html from git, pointed at this branch instead of crates.io
+#      (see the comment further down for why a plain [patch.crates-io] isn't
+#      enough here), then render every `.one` section from the SAS-provided
+#      sample and write a JSON report (section -> ok/fail, pages, ms).
+#   3. Re-render the known 2.3 GB section alone with a 20-minute timeout and
+#      RSS capture, since the main pass uses a short per-section timeout.
 #
 # Required env:
 #   SAS_URL              - secure env var; read-only SAS to the sample container
@@ -51,24 +53,25 @@ git clone --branch "$BRANCH" --depth 1 "$REPO" /work/src 2>&1 | tail -5
 ) | tee /tmp/cargo_test_wrapper.log
 grep -q '^cargo_test_exit=0$' /tmp/cargo_test_wrapper.log && echo "== cargo test: PASS ==" || echo "== cargo test: FAIL (see above) =="
 
-echo "== building one2html from git, patched to use ${REPO}@${BRANCH} =="
-# `cargo install --git ... --config patch.crates-io...` silently ignores the
-# patch regardless of --locked -- one2html's own Cargo.toml already carries a
-# [patch.crates-io] pointing onenote_parser at upstream `master`, and that
-# manifest-level patch isn't honored by `cargo install --git` either. Cloning
-# one2html and building with `cargo install --path .` uses the normal
-# workspace-root patch resolution path, which does honor [patch]. Its
-# existing [patch.crates-io] table (the last section in the file) is replaced
-# with one pointing at our fix branch instead of appended, since TOML doesn't
-# allow duplicate tables.
+echo "== building one2html from git, pointed at ${REPO}@${BRANCH} =="
+# `[patch.crates-io]` -- whether via `cargo install --config`, or a real
+# [patch.crates-io] table in one2html's own Cargo.toml (which already ships
+# one pointing at upstream `master`) -- is refused by cargo: patches must be
+# semver-compatible with the dependency's version requirement, and this
+# branch is onenote_parser 2.0.0 against one2html's `onenote_parser = "1.1"`
+# requirement (confirmed: identical "versions that meet the requirements
+# ^1.1 are: 1.1.1, 1.1.0" resolution failure whether or not the patch is
+# present/correct). The onenote_parser 2.0 API surface itself is unchanged
+# for everything one2html uses (verified by inspecting its source), so the
+# actual fix is a one-line dependency change: point `onenote_parser`
+# directly at this git branch instead of crates.io, dropping the version
+# requirement entirely. This is the one2html diff called out in
+# gta/REPORT.md for the lead to apply upstream.
 t0=$(date +%s)
 git clone https://github.com/msiemens/one2html /work/one2html > /tmp/one2html_clone.log 2>&1
 sed -i '/^\[patch\.crates-io\]/,$d' /work/one2html/Cargo.toml
-cat >> /work/one2html/Cargo.toml <<EOF
-
-[patch.crates-io]
-onenote_parser = { git = "${REPO}", branch = "${BRANCH}" }
-EOF
+sed -i "s#^onenote_parser = .*#onenote_parser = { git = \"${REPO}\", branch = \"${BRANCH}\", default-features = false }#" /work/one2html/Cargo.toml
+grep -n "^onenote_parser" /work/one2html/Cargo.toml
 (
   cd /work/one2html
   cargo +nightly install --path .
@@ -132,4 +135,29 @@ echo "== SUMMARY: ok=$ok fail=$fail pages=$pages_total (of $n_one sections consi
 echo "== REPORT JSON =="
 cat "$report"
 echo
+
+# Dedicated big-file pass: the main loop above uses a short per-section
+# timeout so one huge/slow section doesn't stall the other 27. Re-render the
+# known 2.3 GB section alone with a 20-minute timeout and RSS capture.
+big_file=$(find /work/in -name '*.one' | grep "Inv Team Mtgs.one" | head -1)
+if [ -n "$big_file" ]; then
+  echo "== big-file pass: $big_file =="
+  bytes=$(stat -c %s "$big_file")
+  outdir="/work/out/rendered_bigfile"
+  mkdir -p "$outdir"
+  t=$(date +%s)
+  /usr/bin/time -v timeout 1200 one2html -i "$big_file" -o "$outdir" > /tmp/bigfile.log 2>&1
+  big_status=$?
+  elapsed=$(( $(date +%s) - t ))
+  pages=$(find "$outdir" -name '*.html' | wc -l)
+  peak_rss=$(grep -i "Maximum resident set size" /tmp/bigfile.log | awk -F': ' '{print $2}')
+  echo "big-file result: exit=$big_status elapsed_s=$elapsed pages=$pages bytes=$bytes peak_rss_kb=${peak_rss:-unknown}"
+  if [ "$big_status" -ne 0 ]; then
+    echo "big-file error tail:"
+    grep -v "^\s*$" /tmp/bigfile.log | grep -Ev "^(Command being timed|User time|System time|Percent of CPU|Elapsed|Average|Maximum resident|Major|Minor|Voluntary|Involuntary|Swaps|File system|Socket|Signals|Page size|Exit status)" | tail -5
+  fi
+else
+  echo "== big-file pass: 'Inv Team Mtgs.one' not found in /work/in, skipping =="
+fi
+
 echo DONE
