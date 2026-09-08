@@ -79,7 +79,9 @@ where
         let id_debug = format!("{id:?}");
         match parse(id, ctx) {
             Ok(item) => items.push(item),
-            Err(err) => warn!(ctx, "skipping unparsable {label} {id_debug}: {err}"),
+            Err(err) => {
+                warn!(ctx, "skipping unparsable {label} {id_debug}: {err}");
+            }
         }
     }
     items
